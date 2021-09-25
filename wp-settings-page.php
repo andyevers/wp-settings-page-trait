@@ -1,7 +1,7 @@
 <?php 
 
 /**
- * Extend your page class from this and create an instance on admin_menu action using the add_menu_page or add_submenu_page function
+ * Creates an option array in wp_options table. Add this trait to your page class and create an instance on admin_menu action using the add_menu_page or add_submenu_page function
  */
 trait WP_Settings_Page
 {
