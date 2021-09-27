@@ -1,15 +1,16 @@
 <?php 
 
 /**
- * Creates an option array in wp_options table. Add this trait to your page class and create an instance on admin_menu action using the add_menu_page or add_submenu_page function
+ * Creates an option array in wp_options table. Add this trait to your page class and create an use register_settings_fields() on admin_menu action when adding the menu page
  */
-trait WP_Settings_Page
+trait WP_Settings_Page_Trait
 {
     // PRIVATE PROPERTIES
     //-----------------------------------------------
 
     private $_current_settings        = [];    // holds current option settings from database
     private $_current_section_id      = null;  // holds the section id that settings are being added to
+    private $_registered_fields       = [];    // holds field IDs that have been registered to ensure no duplicates.
     private $_current_section_options = [];    // the third arg given in start_fields_section for the current section
     private $_is_first_fields_section = true;  // used to know if settings_field() function needs to be fired
     private $_is_registering_fields   = false; // used to know whether to allow adding fields
@@ -20,10 +21,10 @@ trait WP_Settings_Page
     //-----------------------------------------------
 
     /** Name of the option that will be stored in the wp_options table */
-    abstract public function get_option();
+    abstract public static function get_option();
 
     /** Slug for the settings page */
-    abstract public function get_slug();
+    abstract public static function get_slug();
 
     /** Registers option fields */
     abstract protected function register_fields();
@@ -37,11 +38,11 @@ trait WP_Settings_Page
         if ($this->_did_register_fields) return;
 
         // will be used to set the current value of each option
-        $this->_current_settings = get_option($this->get_option());
+        $this->_current_settings = get_option(self::get_option());
 
         // we're using the option as the group name too. 
-        $wp_option  = $this->get_option();
-        $group_name = $this->get_option();
+        $wp_option  = self::get_option();
+        $group_name = self::get_option();
 
         // add wp_option to DB. get_option($wp_option) returns an assoc array of the settings registered on the page
         register_setting($group_name, $wp_option);
@@ -69,7 +70,6 @@ trait WP_Settings_Page
     }
 
 
-
     /**
      * Creates a new group of fields that can be echoed together using do_fields_section
      */
@@ -81,7 +81,19 @@ trait WP_Settings_Page
 
         // Echo description before doing callback
         $callback = function ($section) use ($section_options) {
-            if (isset($section_options['description'])) echo $section_options['description'];
+
+            $allowed_html = [
+                'p' => [],
+                'div' => [],
+                'span' => [],
+                'a' => [
+                    'href' => [],
+                    'class' => [],
+                    'target' => [],
+                ]
+            ];
+
+            if (isset($section_options['description'])) echo wp_kses($section_options['description'], $allowed_html);
             if (isset($section_options['callback']))    call_user_func($section_options['callback'], $section);
         };
 
@@ -89,7 +101,7 @@ trait WP_Settings_Page
             $section_id,
             $label,
             $callback,
-            $this->get_slug()
+            self::get_slug()
         );
 
         $this->_current_section_options = $section_options;
@@ -115,17 +127,17 @@ trait WP_Settings_Page
     {
         global $wp_settings_sections;
 
-        $page      = $this->get_slug();
+        $page      = self::get_slug();
         $sections  = self::get_arr_key((array)$wp_settings_sections, $page, null);
         $section   = self::get_arr_key($sections, $section_id, null);
 
         // Error handling
-        if ($sections === null) wp_die("$page does not have any registered sections.");
+        if ($sections === null) wp_die("$page does not have any registered sections. Call register_settings_fields to register.");
         if ($section === null)  wp_die("$section_id is not a registered section.");
 
         if ($this->_is_first_fields_section === true) {
 
-            $group_name = $this->get_option();
+            $group_name = self::get_option();
 
             settings_fields($group_name); // prevents directing to wp options page after submit
 
@@ -175,21 +187,27 @@ trait WP_Settings_Page
 
     /**
      * Gets the HTML name attribute for a setting
+     * @param string $field_id id of the field to get the value of
+     * @param boolean $is_multiple whether the field contains multiple values
      */
-    private function get_name_attribute($field_id)
+    private function get_name_attribute($field_id, $is_multiple = false)
     {
-        $wp_option = $this->get_option();
-        return "{$wp_option}[$field_id]";
+        $wp_option = self::get_option();
+        $name = "{$wp_option}[$field_id]";
+        return $is_multiple ? $name . '[]' : $name;
     }
 
 
-    private function verify_keys($arr, $keys)
+    /**
+     * Kills the script if any of the specified keys are not found in $arr
+     */
+    private function verify_keys($field_id, $arr, $keys)
     {
         if (!is_array($keys)) $keys = [$keys];
 
         foreach ($keys as $key) {
             if (!array_key_exists($key, $arr)) {
-                wp_die("key $key is required");
+                wp_die("key $key is required for field $field_id");
             }
         }
     }
@@ -197,6 +215,7 @@ trait WP_Settings_Page
 
     private static function print_text($text, $tag = null, $atts = [])
     {
+        // HTML and attributes that will not be filtered out of $text string
         $allowed_html = [
             'p' => [],
             'div' => [],
@@ -216,12 +235,25 @@ trait WP_Settings_Page
         echo $tag_open . wp_kses($text, $allowed_html) . $tag_close;
     }
 
+    /**
+     * Merges $this->_current_section_options['field_options'] with the $options array provided
+     */
+    private function merge_shared_field_options($options)
+    {
+        $section_options = $this->_current_section_options;
+        $shared_options = isset($section_options['field_options'])
+            ? $section_options['field_options'] : [];
+
+        return array_merge($shared_options, $options);
+    }
+
 
     /** 
      * method and post atts automatically included 
      */
-    protected function get_form_attribute_string($addon_atts = [])
+    protected static function get_form_attribute_string($addon_atts = [])
     {
+        //method and action required for forms
         $atts = array_merge($addon_atts, [
             'method' => 'post',
             'action' => 'options.php',
@@ -234,177 +266,302 @@ trait WP_Settings_Page
         return $att_string;
     }
 
-    // FIELD FUNCTIONS
-    //-----------------------------------------------
 
-    private function add_field($field_id, $label, $options, $callback)
+    /**
+     * Takes keys from options and sets as attribute if it is an allowed attribute for the input type
+     * Attributes not listed in here for the type provided will not be added to the HTML input.
+     * @param array $options argument in field function.
+     * @param string $type the input type
+     */
+    private static function extract_atts_by_type($options, $type)
     {
-        // Error handling
-        if (!$this->_current_section_id)    wp_die("You cannot add field $field_id outside of a field section");
-        if (!is_string($field_id))          wp_die("field_id must be a string");
-        if (!$this->_is_registering_fields) wp_die('field can only be called inside register_fields()');
-
-        // Merge args set in the start_fields_section() function
-        $shared_field_options = self::get_arr_key($this->_current_section_options, 'field_options', []);
-        $field_options        = array_merge($shared_field_options, $options);
-
-        // Array that is passed to the field callback
-        $callback_args = [
-            'field_id'  => $field_id,
-            'label'     => $label,
-            'options'   => $field_options,
-
-            // class and label_for are default args used by wp settings API
-            'class'     => self::get_arr_key($field_options, 'class', null),
-            'label_for' => self::get_arr_key($field_options, 'label_for', null),
+        // attributes allowed for inputs by type
+        $input_attributes = [
+            'min'         => ['number', 'range', 'date', 'datetime', 'datetime-local', 'time'],
+            'max'         => ['number', 'range', 'date', 'datetime', 'datetime-local', 'time'],
+            'step'        => ['number', 'range', 'date', 'datetime', 'datetime-local', 'time'],
+            'minlength'   => ['email', 'password', 'tel', 'text', 'url', 'search', 'textarea'],
+            'maxlength'   => ['email', 'password', 'tel', 'text', 'url', 'search', 'textarea'],
+            'placeholder' => ['email', 'password', 'tel', 'text', 'url', 'search', 'textarea'],
+            'pattern'     => ['password', 'text', 'tel'],
+            'checked'     => ['radio', 'checkbox'],
+            'multiple'    => ['email', 'file'],
+            'rows'        => ['textarea'],
+            'capture'     => ['file'],
+            'readonly'    => ['ALL'],
+            'required'    => ['ALL'],
+            'disabled'    => ['ALL'],
+            'type'        => ['ALL'],
+            'id'          => ['ALL'],
+            'name'        => ['ALL'],
+            'value'       => ['ALL'],
+            'class'       => ['ALL']
         ];
+
+        $atts = [];
+        //default atts
+        foreach ($input_attributes as $attribute => $types) {
+            $allowed_attribute = $types === ['ALL'] || in_array($type, $types);
+            $has_attribute     = isset($options[$attribute]);
+
+            if ($has_attribute && $allowed_attribute) {
+                $atts[$attribute] = $options[$attribute];
+            }
+        }
+
+        return $atts;
+    }
+
+    /**
+     * Adds field data to option value in wp_options table
+     */
+    private function register_field($field_id, $label, $options, $field_callback)
+    {
+        $already_registered = in_array($field_id, $this->_registered_fields);
+
+        // Error handling
+        if (!$this->_is_registering_fields) wp_die('field can only be called inside register_fields()');
+        if (!is_string($field_id))          wp_die("field_id must be a string");
+        if (!$this->_current_section_id)    wp_die("You cannot add field $field_id outside of a field section");
+        if ($already_registered)            wp_die("field $field_id has already been registered");
+
+        // 'label_for' and 'class' are default settings args. 'class' checked as 'row_class' not to mix up field class att.
+        $settings  = [];
+        $label_for = isset($options['label_for']) ? $options['label_for'] : $field_id;
+        $row_class = isset($options['row_class']) ? $options['row_class'] : null;
+
+        if ($label_for !== null) $settings['label_for'] = $label_for;
+        if ($row_class !== null) $settings['class'] = $row_class;
 
         // Setting added to DB returned in option array
         add_settings_field(
             $field_id,
             $label,
-            $callback,
-            $this->get_slug(),
+            $field_callback,
+            self::get_slug(),
             $this->_current_section_id,
-            $callback_args
+            $settings
         );
+
+        // Prevents duplicates
+        $this->_registered_fields[] = $field_id;
     }
 
 
-    /** 
-     * Checkbox Field
-     */
-    protected function field_checkbox($field_id, $label, $options = [])
-    {
-        $this->add_field($field_id, $label, $options, function ($field_args) {
+    // FIELD METHODS
+    //-----------------------------------------------
 
-            $field_id    = $field_args['field_id'];
-            $options     = $field_args['options'];
-            $value       = self::get_arr_key($options, 'value', 'yes');
+    /**
+     * Create an <input> field
+     * 
+     * @param array $options required: type
+     */
+    protected function field_input($id, $label, $options)
+    {
+        $this->verify_keys($id, $options, ['type']);
+        $options = $this->merge_shared_field_options($options);
+
+        // set id, name and value in options array to become attributes
+        $default          = self::get_arr_key($options, 'default', '');
+        $options['id']    = $id;
+        $options['name']  = $this->get_name_attribute($id);
+        $options['value'] = self::get_arr_key($this->get_settings(), $id, $default);
+
+        // create HTML field
+        $field_callback = function () use ($options) {
+
+            $type        = $options['type'];
+            $atts        = self::extract_atts_by_type($options, $type);
             $description = self::get_arr_key($options, 'description', '');
 
-            $atts_string = self::create_attribute_string([
-                'type'   => 'checkbox',
-                'id'     => $field_id,
-                'name'   => $this->get_name_attribute($field_id),
-                'value'  => $value,
-            ]); ?>
+            //adds 'regular-text' class to textual fields to set the width
+            $textual_fields = ['email', 'password', 'tel', 'text', 'url', 'search'];
+            if (in_array($type, $textual_fields)) {
+                $atts['class'] = isset($atts['class']) ? $atts['class'] : '';
+                $atts['class'] .= ' regular-text';
+            } ?>
 
-            <label>
-                <input <?php echo $atts_string; ?> <?php checked($this->get_settings($field_id), $value) ?> />
-                <?php self::print_text($description); ?>
-            </label>
-        <?php
+            <input <?php echo self::create_attribute_string($atts); ?>><br>
+            <?php self::print_text($description, 'p'); ?>
 
-        });
+            <?php };
+
+        // register setting field
+        $this->register_field($id, $label, $options, $field_callback);
     }
+
+    /**
+     * Creates multiple <input>. checkbox or radio.
+     * 
+     * @param array $options required: type, options
+     */
+    protected function field_inputs($id, $label, $options)
+    {
+        $this->verify_keys($id, $options, ['type', 'options']);
+        $options = $this->merge_shared_field_options($options);
+
+        //set id to become attribute
+        $default          = self::get_arr_key($options, 'default', '');
+        $options['id']    = $id;
+        $options['value'] = self::get_arr_key($this->get_settings(), $id, $default);
+
+        $field_callback = function () use ($options) {
+
+            $id            = $options['id'];
+            $type          = $options['type'];
+            $input_options = $options['options'];
+            $description   = self::get_arr_key($options, 'description', '');
+
+            self::print_text($description, 'p');
+
+            //create each input
+            foreach ($input_options as $value => $label) :
+
+                $is_multiple_values = $type === 'checkbox';
+
+                //if there are multiple values, check if the value is in the array to see if it's checked.
+                $is_checked = is_array($options['value'])
+                    ? in_array($value, $options['value'])
+                    : checked($value, $options['value'], false);
+
+                $atts = [
+                    'type'  => $type,
+                    'name'  => $this->get_name_attribute($id, $is_multiple_values),
+                    'value' => $value,
+                ];
+
+                if ($is_checked) $atts['checked'] = 'checked'; ?>
+
+                <label>
+                    <input <?php echo self::create_attribute_string($atts); ?> /><?php esc_html_e($label); ?>
+                </label>
+                <br>
+
+            <?php endforeach; ?>
+        <?php };
+
+        $this->register_field($id, $label, $options, $field_callback);
+    }
+
 
 
     /**
-     * Text Field
+     * Create <select> dropdown field
+     * 
+     * @param array $options required: options
      */
-    protected function field_text($field_id, $label, $options = [])
+    protected function field_select($id, $label, $options)
     {
-        $this->add_field($field_id, $label, $options, function ($field_args) {
+        $this->verify_keys($id, $options, ['options']);
+        $options = $this->merge_shared_field_options($options);
 
-            $field_id        = $field_args['field_id'];
-            $options         = $field_args['options'];
-            $description     = self::get_arr_key($options, 'description', '');
-            $default         = self::get_arr_key($options, 'default', '');
-            $placeholder     = self::get_arr_key($options, 'placeholder', null);
-            $placeholder_att = is_string($placeholder) ? '' : 'placeholder';
+        $default          = self::get_arr_key($options, 'default', '');
+        $options['id']    = $id;
+        $options['name']  = $this->get_name_attribute($id);
+        $options['value'] = self::get_arr_key($this->get_settings(), $id, $default);
 
-            $atts_string = self::create_attribute_string([
-                'type'           => 'text',
-                'id'             => $field_id,
-                'name'           => $this->get_name_attribute($field_id),
-                'value'          => self::get_arr_key($this->get_settings(), $field_id, $default),
-                'class'          => 'regular-text',
-                $placeholder_att => $placeholder
-            ]);
-        ?>
-            <input <?php echo $atts_string; ?>><br>
-            <?php self::print_text($description, 'p'); ?>
-        <?php
-        });
-    }
+        // create HTML field
+        $field_callback = function () use ($options) {
 
-    /** 
-     * Radio Field
-     */
-    protected function field_radio($field_id, $label, $options = [])
-    {
-        $this->verify_keys($options, ['options']);
-
-        $this->add_field($field_id, $label, $options, function ($field_args) {
-
-            $field_id       = $field_args['field_id'];
-            $options        = $field_args['options'];
-            $description    = self::get_arr_key($options, 'description', '');
-            $radio_options  = $options['options'];
-        ?>
-            <fieldset>
-                <?php
-                if (!empty($description)) {
-                    self::print_text($description);
-                    echo '<br>';
-                }
-
-                foreach ($radio_options as $value => $label) :
-                    $atts_string = self::create_attribute_string([
-                        'type'   => 'radio',
-                        'id'     => $field_id,
-                        'name'   => $this->get_name_attribute($field_id),
-                        'value'  => $value,
-                    ]);
-                ?>
-                    <label>
-                        <input <?php echo $atts_string; ?> <?php checked($this->get_settings($field_id), $value) ?> /><?php esc_html_e($label); ?>
-                    </label>
-                    <br>
-
-                <?php endforeach; ?>
-
-            </fieldset>
-        <?php
-        });
-    }
-
-    /** 
-     * Select Field
-     */
-    protected function field_select($field_id, $label, $options = [])
-    {
-        $this->verify_keys($options, ['options']);
-
-        $this->add_field($field_id, $label, $options, function ($field_args) {
-
-            $field_id       = $field_args['field_id'];
-            $options        = $field_args['options'];
-            $description    = self::get_arr_key($options, 'description', '');
             $select_options = $options['options'];
-            $cur_value      = $this->get_settings($field_id);
+            $cur_value      = $options['value'];
+            $atts           = self::extract_atts_by_type($options, 'select');
+            $description    = self::get_arr_key($options, 'description', ''); ?>
 
-            $atts_string_select = self::create_attribute_string([
-                'name' => $this->get_name_attribute($field_id),
-            ]);
-        ?>
-            <select <?php echo $atts_string_select ?>>
+            <select <?php echo self::create_attribute_string($atts); ?>>
 
-                <?php
-                foreach ($select_options as $value => $label) :
-                    $atts_string = self::create_attribute_string([
-                        'value' => $value
-                    ]);
-                ?>
-                    <option <?php echo $atts_string; ?> <?php selected($value, $cur_value); ?>>
+                <?php foreach ($select_options as $value => $label) : ?>
+
+                    <option value="<?php esc_attr_e($value); ?>" <?php selected($value, $cur_value); ?>>
                         <?php esc_html_e($label); ?>
                     </option>
 
                 <?php endforeach; ?>
             </select>
-            <?php self::print_text($description, 'p'); ?>
+        <?php self::print_text($description, 'p');
+        };
+
+        $this->register_field($id, $label, $options, $field_callback);
+    }
+
+
+    /**
+     * Create single <input type="checkbox"/> field
+     */
+    protected function field_check($id, $label, $options = [])
+    {
+        $options = $this->merge_shared_field_options($options);
+
+        // keys added to options to be added as HTML attributes
+        $options['id']    = $id;
+        $options['name']  = $this->get_name_attribute($id);
+        $options['value'] = self::get_arr_key($options, 'value', 1);
+        $options['type']  = 'checkbox';
+
+        $field_callback = function () use ($options) {
+
+            $id          = $options['id'];
+            $value       = $options['value'];
+            $cur_value   = self::get_arr_key($this->get_settings(), $id, null);
+            $atts        = self::extract_atts_by_type($options, 'checkbox');
+            $description = self::get_arr_key($options, 'description', ''); ?>
+
+            <label>
+                <input <?php echo self::create_attribute_string($atts) ?> <?php checked($value, $cur_value) ?> /><?php self::print_text($description); ?>
+            </label>
+        <?php };
+
+        $this->register_field($id, $label, $options, $field_callback);
+    }
+
+    /**
+     * Create <textarea> field
+     */
+    protected function field_textarea($id, $label, $options = [])
+    {
+        $options = $this->merge_shared_field_options($options);
+
+        // keys added to options to be added as HTML attributes
+        $options['id']    = $id;
+        $options['name']  = $this->get_name_attribute($id);
+        $options['class'] = isset($options['class']) ? $options['class'] . ' regular-text' : 'regular-text';
+
+        $field_callback = function () use ($options) {
+
+            $id          = $options['id'];
+            $default     = self::get_arr_key($options, 'default', '');
+            $value       = self::get_arr_key($this->get_settings(), $id, $default);
+            $atts        = self::extract_atts_by_type($options, 'textarea');
+            $description = self::get_arr_key($options, 'description', ''); ?>
+
+            <textarea <?php echo self::create_attribute_string($atts) ?>><?php esc_html_e($value); ?></textarea>
 <?php
-        });
+            self::print_text($description, 'p');
+        };
+
+        $this->register_field($id, $label, $options, $field_callback);
+    }
+
+
+    /**
+     * Creates WYSIWYG field. $options are for wp_editor() function. $options are for third arg in wp_editor() function.
+     * See options at: https://developer.wordpress.org/reference/classes/_wp_editors/parse_settings/
+     */
+    protected function field_wysiwyg($id, $label, $options)
+    {
+        $options = $this->merge_shared_field_options($options);
+
+        $options['id'] = $id;
+        $options['textarea_name'] = $this->get_name_attribute($id);
+
+        $field_callback = function () use ($options) {
+            $id          = $options['id'];
+            $description = self::get_arr_key($options, 'description', '');
+
+            wp_editor($this->get_settings($id), $id, $options);
+            self::print_text($description, 'p');
+        };
+
+        $this->register_field($id, $label, $options, $field_callback);
     }
 }
